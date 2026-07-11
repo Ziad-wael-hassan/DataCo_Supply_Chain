@@ -1,0 +1,27 @@
+# Secrets
+.env
+dbt/profiles.yml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.last_run_id
+
+# dbt
+dbt/dataco_analytics/target/
+dbt/dataco_analytics/dbt_packages/
+dbt/dataco_analytics/logs/
+
+# Airflow
+airflow/logs/
+airflow/airflow.db
+airflow/airflow.cfg
+airflow/webserver_config.py
+
+# Data (keep raw CSV out of git if large; use data/sample/ for a small sample instead)
+raw/*.csv
+
+# OS
+.DS_Store
