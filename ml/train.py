@@ -192,6 +192,21 @@ for t in np.arange(0.05, 1.00, 0.05):
 
 log.info("Optimal threshold: %.2f  (F1=%.4f)", best_threshold, best_f1)
 
+# Recompute predictions/metrics at the deployed threshold, not the
+# sklearn default 0.5 — everything saved below must reflect the
+# threshold actually stored in fraud_model.pkl and used by predict.py.
+y_pred = (y_prob >= best_threshold).astype(np.int8)
+precision = precision_score(y_test, y_pred)
+recall    = recall_score(y_test, y_pred)
+f1        = f1_score(y_test, y_pred)
+report_str = classification_report(y_test, y_pred, target_names=["clean", "fraud"])
+cm = confusion_matrix(y_test, y_pred)
+
+log.info("Metrics at deployed threshold (%.2f):", best_threshold)
+log.info("  Precision : %.4f", precision)
+log.info("  Recall    : %.4f", recall)
+log.info("  F1        : %.4f", f1)
+
 
 # -----------------------------------------------------------------------
 # 7. Save outputs

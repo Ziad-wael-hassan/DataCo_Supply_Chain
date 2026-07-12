@@ -327,9 +327,9 @@ Pipeline run monitoring — one row per `load_raw.py` execution.
 ### Performance (test set, 36,144 rows)
 | Metric | Value |
 |---|---|
-| Precision | 0.8488 |
-| Recall | 0.0898 |
-| F1 | 0.1624 |
+| Precision | 0.4144 |
+| Recall | 0.4022 |
+| F1 | 0.4082 |
 | ROC-AUC | 0.9552 |
 
 ### Inference artifact (`fraud_model.pkl`)
