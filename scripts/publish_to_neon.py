@@ -1,9 +1,8 @@
 """
 publish_to_neon.py — Synchronize final warehouse tables to Neon.
 
-Reads from local PostgreSQL, writes to Neon using batch operations.
-Each table wrapped in its own transaction — a failure rolls back that
-table and continues with the rest.
+Reads from local PostgreSQL (SQLAlchemy), writes to Neon (psycopg2 execute_values)
+for batch insert performance. Each table wrapped in its own transaction.
 
 Sync modes (configured in config/sync_tables.yml):
   full         — Compare PK counts; if different, DELETE + batch INSERT
@@ -21,8 +20,10 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
+import psycopg2
+import psycopg2.extras
 import yaml
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, inspect, text
@@ -47,7 +48,7 @@ SYNC_CONFIG_PATH: Path = (
     Path(__file__).resolve().parent.parent / "config" / "sync_tables.yml"
 )
 
-BATCH_SIZE: int = 500
+NEON_PAGE_SIZE: int = 10000
 
 
 # ---------------------------------------------------------------------------
@@ -64,44 +65,47 @@ def _log_section(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Engine creation
+# Neon connection
 # ---------------------------------------------------------------------------
-def create_neon_engine() -> Optional[Engine]:
-    """Create SQLAlchemy engine for Neon. Returns None if unconfigured."""
-    if not all([NEON_HOST, NEON_DATABASE, NEON_USER, NEON_PASSWORD]):
-        return None
-    uri = (
-        f"postgresql://{NEON_USER}:{NEON_PASSWORD}"
-        f"@{NEON_HOST}:{NEON_PORT}/{NEON_DATABASE}?sslmode=require"
+def get_neon_dsn() -> str:
+    return (
+        f"dbname={NEON_DATABASE} user={NEON_USER} password={NEON_PASSWORD}"
+        f" host={NEON_HOST} port={NEON_PORT} sslmode=require"
     )
-    return create_engine(uri)
+
+
+def get_neon_conn():
+    return psycopg2.connect(get_neon_dsn())
+
+
+# ---------------------------------------------------------------------------
+# Local engine (SQLAlchemy for reads)
+# ---------------------------------------------------------------------------
+def create_local_engine() -> Engine:
+    return create_engine(POSTGRES_URI)
 
 
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
 def load_sync_config() -> List[Dict[str, Any]]:
-    """Load table registry from config/sync_tables.yml."""
     with open(SYNC_CONFIG_PATH) as f:
         return yaml.safe_load(f)["tables"]
 
 
 # ---------------------------------------------------------------------------
-# Schema introspection
+# Schema introspection (SQLAlchemy, read-only)
 # ---------------------------------------------------------------------------
 def get_columns(engine: Engine, schema: str, table: str) -> List[str]:
-    """Get ordered column names from an existing table."""
     inspector = inspect(engine)
     return [col["name"] for col in inspector.get_columns(table, schema=schema)]
 
 
 def table_exists(engine: Engine, schema: str, table: str) -> bool:
-    """Check if a table exists."""
     return inspect(engine).has_table(table, schema=schema)
 
 
 def count_rows(engine: Engine, schema: str, table: str) -> int:
-    """Count rows in a table."""
     with engine.connect() as conn:
         result = conn.execute(
             text(f"SELECT count(*) FROM {schema}.{table}")
@@ -109,25 +113,109 @@ def count_rows(engine: Engine, schema: str, table: str) -> int:
         return result.scalar()
 
 
-def get_pks(engine: Engine, schema: str, table: str, pk: str) -> Set[Any]:
-    """Get all values of the primary key column."""
-    with engine.connect() as conn:
-        result = conn.execute(
-            text(f"SELECT {pk} FROM {schema}.{table}")
-        )
-        return {row[0] for row in result}
+def get_pks_neon(schema: str, table: str, pk: str) -> Set[Any]:
+    conn = get_neon_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT {pk} FROM {schema}.{table}")
+        pks = {row[0] for row in cur.fetchall()}
+        cur.close()
+        return pks
+    finally:
+        conn.close()
 
 
-def get_max_timestamp(
-    engine: Engine, table: str, date_column: str
-) -> Optional[str]:
-    """Get MAX(date_column) from a table. Returns None if empty."""
-    with engine.connect() as conn:
-        result = conn.execute(
-            text(f"SELECT MAX({date_column}) FROM {table}")
-        )
-        val = result.scalar()
+def get_max_timestamp_neon(table: str, date_column: str) -> Optional[str]:
+    conn = get_neon_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT MAX({date_column}) FROM {table}")
+        val = cur.fetchone()[0]
+        cur.close()
         return str(val) if val is not None else None
+    finally:
+        conn.close()
+
+
+def read_local(engine: Engine, schema: str, table: str) -> List[Dict[str, Any]]:
+    with engine.connect() as conn:
+        return [row._asdict() for row in conn.execute(text(f"SELECT * FROM {schema}.{table}"))]
+
+
+# ---------------------------------------------------------------------------
+# Neon write helpers (psycopg2 execute_values)
+# ---------------------------------------------------------------------------
+def _neon_delete_all(schema: str, table: str) -> None:
+    conn = get_neon_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"DELETE FROM {schema}.{table}")
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+
+
+def _neon_insert(schema: str, table: str, columns: List[str], rows: List[tuple]) -> None:
+    cols_str = ", ".join(columns)
+    sql = f"INSERT INTO {schema}.{table} ({cols_str}) VALUES %s"
+    chunk_size = NEON_PAGE_SIZE
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i : i + chunk_size]
+        conn = get_neon_conn()
+        try:
+            cur = conn.cursor()
+            psycopg2.extras.execute_values(cur, sql, chunk, page_size=NEON_PAGE_SIZE)
+            conn.commit()
+            cur.close()
+        finally:
+            conn.close()
+
+
+def _neon_insert_on_conflict_do_nothing(
+    schema: str, table: str, columns: List[str], rows: List[tuple], pk: str
+) -> None:
+    cols_str = ", ".join(columns)
+    sql = f"INSERT INTO {schema}.{table} ({cols_str}) VALUES %s ON CONFLICT ({pk}) DO NOTHING"
+    chunk_size = NEON_PAGE_SIZE
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i : i + chunk_size]
+        conn = get_neon_conn()
+        try:
+            cur = conn.cursor()
+            psycopg2.extras.execute_values(cur, sql, chunk, page_size=NEON_PAGE_SIZE)
+            conn.commit()
+            cur.close()
+        finally:
+            conn.close()
+
+
+def _neon_upsert(
+    schema: str, table: str, columns: List[str], rows: List[tuple], pk: str
+) -> None:
+    cols_str = ", ".join(columns)
+    update_clause = ", ".join(
+        f"{c} = EXCLUDED.{c}" for c in columns if c != pk
+    )
+    sql = (
+        f"INSERT INTO {schema}.{table} ({cols_str}) VALUES %s"
+        f" ON CONFLICT ({pk}) DO UPDATE SET {update_clause}"
+    )
+    chunk_size = NEON_PAGE_SIZE
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i : i + chunk_size]
+        conn = get_neon_conn()
+        try:
+            cur = conn.cursor()
+            psycopg2.extras.execute_values(cur, sql, chunk, page_size=NEON_PAGE_SIZE)
+            conn.commit()
+            cur.close()
+        finally:
+            conn.close()
+
+
+def _rows_to_tuples(rows: List[Dict[str, Any]], columns: List[str]) -> List[tuple]:
+    return [tuple(row[c] for c in columns) for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -135,19 +223,18 @@ def get_max_timestamp(
 # ---------------------------------------------------------------------------
 def sync_full(
     local_engine: Engine,
-    neon_engine: Engine,
     schema: str,
     table: str,
     pk: str,
     force: bool = False,
 ) -> Dict[str, Any]:
-    """Full sync: DELETE all + INSERT if row count differs."""
     full_table = f"{schema}.{table}"
     local_count = count_rows(local_engine, schema, table)
 
     if not force:
         try:
-            neon_count = count_rows(neon_engine, schema, table)
+            neon_count_rows = get_pks_neon(schema, table, pk)
+            neon_count = len(neon_count_rows)
         except Exception:
             neon_count = 0
 
@@ -156,19 +243,11 @@ def sync_full(
             return {"inserted": 0, "updated": 0, "skipped": local_count, "mode": "skip"}
 
     columns = get_columns(local_engine, schema, table)
-    cols_str = ", ".join(columns)
-    placeholders = ", ".join(f":{c}" for c in columns)
-    insert_sql = text(
-        f"INSERT INTO {full_table} ({cols_str}) VALUES ({placeholders})"
-    )
+    rows = read_local(local_engine, schema, table)
+    tuples = _rows_to_tuples(rows, columns)
 
-    with local_engine.connect() as conn:
-        rows = [dict(row) for row in conn.execute(text(f"SELECT * FROM {schema}.{table}"))]
-
-    with neon_engine.begin() as conn:
-        conn.execute(text(f"DELETE FROM {full_table}"))
-        for i in range(0, len(rows), BATCH_SIZE):
-            conn.execute(insert_sql, rows[i : i + BATCH_SIZE])
+    _neon_delete_all(schema, table)
+    _neon_insert(schema, table, columns, tuples)
 
     _log(f"  Full sync: {local_count:,} rows")
     return {"inserted": local_count, "updated": 0, "skipped": 0, "mode": "full"}
@@ -179,47 +258,32 @@ def sync_full(
 # ---------------------------------------------------------------------------
 def sync_upsert(
     local_engine: Engine,
-    neon_engine: Engine,
     schema: str,
     table: str,
     pk: str,
 ) -> Dict[str, Any]:
-    """Upsert sync: insert only rows with PKs not yet in Neon."""
     full_table = f"{schema}.{table}"
     local_count = count_rows(local_engine, schema, table)
 
-    neon_pks = get_pks(neon_engine, schema, table, pk)
+    neon_pks = get_pks_neon(schema, table, pk)
     if len(neon_pks) == 0:
         _log(f"  Neon table empty — inserting all {local_count:,} rows")
     else:
         _log(f"  Local: {local_count:,} rows | Neon: {len(neon_pks):,} PKs")
 
     columns = get_columns(local_engine, schema, table)
-    cols_str = ", ".join(columns)
-    placeholders = ", ".join(f":{c}" for c in columns)
-    insert_sql = text(
-        f"INSERT INTO {full_table} ({cols_str}) VALUES ({placeholders})"
-        f" ON CONFLICT ({pk}) DO NOTHING"
-    )
-
-    with local_engine.connect() as conn:
-        all_rows = [dict(row) for row in conn.execute(text(f"SELECT * FROM {schema}.{table}"))]
-
+    all_rows = read_local(local_engine, schema, table)
     new_rows = [r for r in all_rows if r[pk] not in neon_pks]
 
     if not new_rows:
         _log(f"  No new rows to insert")
         return {"inserted": 0, "updated": 0, "skipped": local_count, "mode": "upsert"}
 
-    inserted = 0
-    with neon_engine.begin() as conn:
-        for i in range(0, len(new_rows), BATCH_SIZE):
-            batch = new_rows[i : i + BATCH_SIZE]
-            conn.execute(insert_sql, batch)
-            inserted += len(batch)
+    tuples = _rows_to_tuples(new_rows, columns)
+    _neon_insert_on_conflict_do_nothing(schema, table, columns, tuples, pk)
 
-    _log(f"  Inserted: {inserted:,} new rows")
-    return {"inserted": inserted, "updated": 0, "skipped": local_count - inserted, "mode": "upsert"}
+    _log(f"  Inserted: {len(new_rows):,} new rows")
+    return {"inserted": len(new_rows), "updated": 0, "skipped": local_count - len(new_rows), "mode": "upsert"}
 
 
 # ---------------------------------------------------------------------------
@@ -227,42 +291,29 @@ def sync_upsert(
 # ---------------------------------------------------------------------------
 def sync_incremental(
     local_engine: Engine,
-    neon_engine: Engine,
     schema: str,
     table: str,
     pk: str,
     date_column: str,
 ) -> Dict[str, Any]:
-    """Incremental sync: rows where date_column > MAX in Neon."""
     full_table = f"{schema}.{table}"
 
-    last_sync = get_max_timestamp(neon_engine, full_table, date_column)
+    last_sync = get_max_timestamp_neon(full_table, date_column)
     if last_sync:
         _log(f"  Last sync: {last_sync}")
     else:
         _log(f"  Neon table empty — full insert")
 
     columns = get_columns(local_engine, schema, table)
-    cols_str = ", ".join(columns)
-    placeholders = ", ".join(f":{c}" for c in columns)
-    update_clause = ", ".join(
-        f"{c} = EXCLUDED.{c}" for c in columns if c != pk
-    )
-    upsert_sql = text(
-        f"INSERT INTO {full_table} ({cols_str}) VALUES ({placeholders})"
-        f" ON CONFLICT ({pk})"
-        f" DO UPDATE SET {update_clause}"
-    )
 
     if last_sync:
         query = text(
             f"SELECT * FROM {schema}.{table} WHERE {date_column} > :last_sync"
         )
         with local_engine.connect() as conn:
-            rows = [dict(row) for row in conn.execute(query, {"last_sync": last_sync})]
+            rows = [row._asdict() for row in conn.execute(query, {"last_sync": last_sync})]
     else:
-        with local_engine.connect() as conn:
-            rows = [dict(row) for row in conn.execute(text(f"SELECT * FROM {schema}.{table}"))]
+        rows = read_local(local_engine, schema, table)
 
     local_count = count_rows(local_engine, schema, table)
 
@@ -270,23 +321,21 @@ def sync_incremental(
         _log(f"  No changed rows (total local: {local_count:,})")
         return {"inserted": 0, "updated": 0, "skipped": local_count, "mode": "incremental"}
 
-    # Count new vs existing
-    neon_pks = get_pks(neon_engine, schema, table, pk)
+    neon_pks = get_pks_neon(schema, table, pk)
+    new_rows = [r for r in rows if r[pk] not in neon_pks]
+    existing_rows = [r for r in rows if r[pk] in neon_pks]
+
     inserted = updated = 0
-    with neon_engine.begin() as conn:
-        for i in range(0, len(rows), BATCH_SIZE):
-            batch = rows[i : i + BATCH_SIZE]
-            new_in_batch = [r for r in batch if r[pk] not in neon_pks]
-            existing_in_batch = [r for r in batch if r[pk] in neon_pks]
 
-            if new_in_batch:
-                conn.execute(insert_sql, new_in_batch)
-                inserted += len(new_in_batch)
-                neon_pks.update(r[pk] for r in new_in_batch)
+    if new_rows:
+        tuples = _rows_to_tuples(new_rows, columns)
+        _neon_insert(schema, table, columns, tuples)
+        inserted = len(new_rows)
 
-            if existing_in_batch:
-                conn.execute(upsert_sql, existing_in_batch)
-                updated += len(existing_in_batch)
+    if existing_rows:
+        tuples = _rows_to_tuples(existing_rows, columns)
+        _neon_upsert(schema, table, columns, tuples, pk)
+        updated = len(existing_rows)
 
     _log(f"  Changed: {len(rows):,} | Inserted: {inserted:,} | Updated: {updated:,}")
     return {
@@ -302,11 +351,9 @@ def sync_incremental(
 # ---------------------------------------------------------------------------
 def sync_table(
     local_engine: Engine,
-    neon_engine: Engine,
     table_config: Dict[str, Any],
     force_full: bool = False,
 ) -> Dict[str, Any]:
-    """Sync one table. Returns stats dict."""
     schema = table_config["schema"]
     table = table_config["table"]
     pk = table_config["pk"]
@@ -324,16 +371,14 @@ def sync_table(
             return {"status": "skipped", "reason": "missing_locally"}
 
         if sync_mode == "full":
-            stats = sync_full(local_engine, neon_engine, schema, table, pk, force=force_full)
+            stats = sync_full(local_engine, schema, table, pk, force=force_full)
         elif sync_mode == "upsert":
-            stats = sync_upsert(local_engine, neon_engine, schema, table, pk)
+            stats = sync_upsert(local_engine, schema, table, pk)
         elif sync_mode == "incremental":
             if not date_column:
                 _log(f"  ERROR: incremental mode requires date_column")
                 return {"status": "failed", "reason": "missing_date_column"}
-            stats = sync_incremental(
-                local_engine, neon_engine, schema, table, pk, date_column
-            )
+            stats = sync_incremental(local_engine, schema, table, pk, date_column)
         else:
             _log(f"  ERROR: unknown sync_mode '{sync_mode}'")
             return {"status": "failed", "reason": f"unknown_mode:{sync_mode}"}
@@ -366,26 +411,21 @@ def main() -> None:
 
     _log_section("Neon Publisher")
 
-    # Create engines
-    local_engine = create_engine(POSTGRES_URI)
-    neon_engine = create_neon_engine()
-
-    if neon_engine is None:
+    if not all([NEON_HOST, NEON_DATABASE, NEON_USER, NEON_PASSWORD]):
         _log("ERROR: Neon not configured. Set NEON_HOST, NEON_DATABASE,")
         _log("       NEON_USER, NEON_PASSWORD environment variables.")
         sys.exit(1)
 
-    # Load table registry
+    local_engine = create_local_engine()
     tables = load_sync_config()
     _log(f"Tables to sync: {len(tables)}")
 
-    # Sync each table
     results: List[Dict[str, Any]] = []
     total_inserted = total_updated = total_skipped = 0
     t_start = time.time()
 
     for tc in tables:
-        result = sync_table(local_engine, neon_engine, tc, force_full=args.full_sync)
+        result = sync_table(local_engine, tc, force_full=args.full_sync)
         results.append({"table": f"{tc['schema']}.{tc['table']}", **result})
         total_inserted += result.get("inserted", 0)
         total_updated += result.get("updated", 0)
@@ -393,7 +433,6 @@ def main() -> None:
 
     total_elapsed = time.time() - t_start
 
-    # Summary
     succeeded = sum(1 for r in results if r.get("status") == "ok")
     failed = sum(1 for r in results if r.get("status") == "failed")
 
