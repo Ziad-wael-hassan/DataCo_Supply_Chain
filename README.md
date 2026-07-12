@@ -327,10 +327,10 @@ Pipeline run monitoring — one row per `load_raw.py` execution.
 ### Performance (test set, 36,144 rows)
 | Metric | Value |
 |---|---|
-| Precision | 0.4144 |
-| Recall | 0.4022 |
-| F1 | 0.4082 |
-| ROC-AUC | 0.9552 |
+| Precision | 0.4013 |
+| Recall | 0.3727 |
+| F1 | 0.3865 |
+| ROC-AUC | 0.9497 |
 
 ### Inference artifact (`fraud_model.pkl`)
 Contains: fitted model, fitted OrdinalEncoder, feature column list, threshold, model version. No refitting at inference time — predict.py applies the preprocessor directly.
