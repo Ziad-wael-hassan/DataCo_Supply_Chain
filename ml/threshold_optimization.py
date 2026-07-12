@@ -38,15 +38,17 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OrdinalEncoder
 
 from config import SAVED_MODELS_DIR, REPORTS_DIR
-from feature_engineering import create_target, load_dataset, prepare_features
+from feature_engineering import load_dataset, prepare_features
 from utils import get_logger
 
 log = get_logger("threshold_opt")
 
 # Columns excluded from the feature matrix X (same as train.py)
 _COLS_TO_EXCLUDE: list[str] = [
-    "order_id",
-    "target",
+    "order_item_id",  # identifier — high cardinality, not a feature
+    "order_id",       # identifier — kept in DF for predict.py but not in X
+    "customer_id",    # identifier — high cardinality, not a feature
+    "target",         # target variable
 ]
 
 # ── Threshold grid ────────────────────────────────────────────────────
@@ -58,7 +60,6 @@ THRESHOLDS = np.arange(0.05, 1.00, 0.05)
 # -----------------------------------------------------------------------
 log.info("Loading dataset …")
 df = load_dataset()
-df = create_target(df)
 df = prepare_features(df)
 
 y = df["target"].astype(np.int8).values
