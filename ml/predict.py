@@ -30,7 +30,7 @@ from utils import get_logger
 
 log = get_logger("predict")
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.1.0"
 
 _PREDICTIONS_DDL = """
 CREATE SCHEMA IF NOT EXISTS warehouse;

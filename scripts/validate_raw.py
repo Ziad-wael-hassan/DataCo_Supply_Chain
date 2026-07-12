@@ -57,7 +57,7 @@ def _get_pending_run_id(engine):
         result = conn.execute(
             text(
                 "SELECT run_id FROM warehouse.etl_runs "
-                "WHERE validation_status = 'pending' "
+                "WHERE validation_status = 'in_progress' "
                 "ORDER BY run_id DESC LIMIT 1"
             )
         )

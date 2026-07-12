@@ -200,7 +200,7 @@ SAVED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # 7a. Complete inference artifact (model + encoder + metadata)
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.1.0"
 inference_artifact = {
     "model":             clf,
     "preprocessor":      preprocessor,
