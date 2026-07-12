@@ -1,7 +1,14 @@
-{{ config(materialized='table') }}
+{{ config(
+    materialized='incremental',
+    unique_key='order_item_id',
+    incremental_strategy='merge'
+) }}
 
 with stg_orders as (
     select * from {{ ref('stg_orders') }}
+    {% if is_incremental() %}
+    where order_item_id not in (select order_item_id from {{ this }})
+    {% endif %}
 ),
 
 dim_shipping_location as (

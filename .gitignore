@@ -20,8 +20,22 @@ airflow/airflow.db
 airflow/airflow.cfg
 airflow/webserver_config.py
 
+# ML
+ml/saved_models/*.pkl
+ml/reports/*.png
+ml/reports/*.json
+ml/reports/*.txt
+ml/reports/*.csv
+ml/.env
+
 # Data (keep raw CSV out of git if large; use data/sample/ for a small sample instead)
 raw/*.csv
+
+# Old notebooks (not part of pipeline)
+/models/
+
+# dbt logs
+logs/dbt.log
 
 # OS
 .DS_Store

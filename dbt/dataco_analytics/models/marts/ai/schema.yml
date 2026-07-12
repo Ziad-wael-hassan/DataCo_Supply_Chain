@@ -1,0 +1,112 @@
+version: 2
+
+models:
+  - name: fraud_features
+    description: >
+      Gold AI layer — single source of truth for ML features.
+      All feature engineering (joins, temporal derivation, leakage/PII
+      exclusion, target computation) happens in this SQL model.
+      Python-side feature_engineering.py reads from this table directly.
+    columns:
+      - name: order_item_id
+        description: "Primary key for the order line item."
+        tests:
+          - unique
+          - not_null
+      - name: order_id
+        description: "Foreign key to the order header."
+        tests:
+          - not_null
+      - name: customer_id
+        description: "Foreign key to the customer dimension."
+        tests:
+          - not_null
+      - name: payment_type
+        description: "Payment method (e.g. TRANSFER, DEBIT, CASH, CREDIT)."
+        tests:
+          - not_null
+      - name: order_item_quantity
+        tests:
+          - not_null
+      - name: sales
+        tests:
+          - not_null
+      - name: sales_per_customer
+        tests:
+          - not_null
+      - name: benefit_per_order
+        tests:
+          - not_null
+      - name: order_profit_per_order
+        tests:
+          - not_null
+      - name: order_item_total
+        tests:
+          - not_null
+      - name: order_item_discount
+        tests:
+          - not_null
+      - name: order_item_discount_rate
+        tests:
+          - not_null
+      - name: order_item_profit_ratio
+        tests:
+          - not_null
+      - name: shipping_mode
+        tests:
+          - not_null
+      - name: order_month
+        description: "Month extracted from order_date (1-12)."
+        tests:
+          - not_null
+      - name: order_day
+        description: "Day of month extracted from order_date (1-31)."
+        tests:
+          - not_null
+      - name: order_hour
+        description: "Hour extracted from order_date (0-23)."
+        tests:
+          - not_null
+      - name: order_day_of_week
+        description: "Day of week extracted from order_date (0=Sunday, 6=Saturday)."
+        tests:
+          - not_null
+      - name: customer_segment
+        tests:
+          - not_null
+      - name: product_price
+        tests:
+          - not_null
+      - name: category_name
+        tests:
+          - not_null
+      - name: department_name
+        tests:
+          - not_null
+      - name: is_weekend
+        tests:
+          - not_null
+      - name: latitude
+        tests:
+          - not_null
+      - name: longitude
+        tests:
+          - not_null
+      - name: order_region
+        tests:
+          - not_null
+      - name: order_country
+        tests:
+          - not_null
+      - name: order_status
+        description: "Raw order status text. Dropped before training."
+        tests:
+          - not_null
+      - name: target
+        description: "Binary fraud label: 1 = SUSPECTED_FRAUD, 0 = clean."
+        tests:
+          - not_null
+      - name: created_at
+        description: "Row creation timestamp (set at dbt run time)."
+        tests:
+          - not_null

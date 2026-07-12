@@ -23,3 +23,6 @@ models:
     marts:
       +schema: warehouse
       +materialized: table
+      ai:
+        +schema: warehouse
+        +materialized: table
