@@ -1,0 +1,41 @@
+# Neon synchronization configuration
+# Each entry defines a table to sync from local PostgreSQL to Neon.
+#
+# sync_mode:
+#   full         — Compare PK count; if different, DELETE all + batch INSERT
+#   upsert       — Compare PKs; INSERT only new rows (append-only tables)
+#   incremental  — Filter by date_column > last_sync; batch UPSERT
+#
+# Adding a table = editing this file. No Python changes needed.
+
+tables:
+  - schema: warehouse
+    table: dim_customers
+    pk: customer_id
+    sync_mode: full
+
+  - schema: warehouse
+    table: dim_products
+    pk: product_card_id
+    sync_mode: full
+
+  - schema: warehouse
+    table: dim_date
+    pk: date_key
+    sync_mode: full
+
+  - schema: warehouse
+    table: dim_shipping_location
+    pk: shipping_location_id
+    sync_mode: full
+
+  - schema: warehouse
+    table: fact_order_items
+    pk: order_item_id
+    sync_mode: upsert
+
+  - schema: warehouse
+    table: predictions
+    pk: order_id
+    sync_mode: incremental
+    date_column: modified_at

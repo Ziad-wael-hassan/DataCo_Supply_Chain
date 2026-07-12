@@ -1,8 +1,8 @@
 # DataCo Supply Chain — Data Engineering + ML Project
 
-End-to-end data pipeline for the Kaggle [DataCo Smart Supply Chain](https://www.kaggle.com/datasets/shashwatwork/dataco-smart-supply-chain-for-big-data-analysis) dataset (~180k order items). Raw CSV → validated → Kimball star schema → Gold AI feature table → fraud detection model → predictions.
+End-to-end data pipeline for the Kaggle [DataCo Smart Supply Chain](https://www.kaggle.com/datasets/shashwatwork/dataco-smart-supply-chain-for-big-data-analysis) dataset (~180k order items). Raw CSV → validated → Kimball star schema → Gold AI feature table → fraud detection model → predictions → Neon (BI serving).
 
-`Python` · `PostgreSQL` · `dbt` · `Apache Airflow` · `scikit-learn` · `Docker` · `Power BI`
+`Python` · `PostgreSQL` · `dbt` · `Apache Airflow` · `scikit-learn` · `Docker` · `Power BI` · `Neon`
 
 ---
 
@@ -39,9 +39,15 @@ dim_customers  dim_products  dim_date  dim_shipping_location
               │                 │
               ▼                 ▼
        fraud_model.pkl   warehouse.predictions
+                               │
+                               ▼
+                      publish_to_neon.py   (sync 6 tables → Neon)
+                               │
+                               ▼
+                          Neon database     (read-only BI serving for Tableau/Power BI)
 ```
 
-Orchestrated by Airflow: `load_raw → validate_raw → dbt_run → dbt_test`, daily.
+Orchestrated by Airflow: `load_raw → validate_raw → dbt_run → dbt_test → predict → publish_to_neon`, daily.
 ML training is manual (`python train.py`); prediction runs via `predict.py`.
 
 ---
@@ -51,7 +57,7 @@ ML training is manual (`python train.py`); prediction runs via `predict.py`.
 ```bash
 git clone <this repo>
 cd dataco-supply-chain-data-engineering
-cp .env.example .env          # fill in real values if not using defaults
+cp .env.example .env          # fill in Neon credentials + other values
 make up                       # docker compose up --build
 make load                     # loads raw CSV into Postgres
 make validate                 # runs incremental validation
@@ -72,6 +78,13 @@ python predict.py --order-id 5349    # predict one order (upsert)
 python predict.py --all-new          # predict all unscored orders
 ```
 
+**Neon publishing** (syncs warehouse → Neon for BI):
+```bash
+psql <neon-url> < scripts/create_neon_schema.sql   # one-time: create tables in Neon
+python scripts/publish_to_neon.py                   # incremental sync (default)
+python scripts/publish_to_neon.py --full-sync       # full sync (dim PK count mismatch)
+```
+
 Airflow UI: `localhost:8080` (admin/admin) · pgAdmin: `localhost:5050` (admin@admin.com/admin)
 
 ---
@@ -79,7 +92,13 @@ Airflow UI: `localhost:8080` (admin/admin) · pgAdmin: `localhost:5050` (admin@a
 ## 3. Repository Structure
 
 ```
-├── scripts/                  load_raw.py, validate_raw.py
+├── config/
+│   └── sync_tables.yml       Neon table registry (6 tables, 3 sync modes)
+├── scripts/
+│   ├── load_raw.py            incremental CSV → Postgres loader
+│   ├── validate_raw.py        data quality checks (etl_run_id watermark)
+│   ├── create_neon_schema.sql one-time DDL for Neon (run with psql)
+│   └── publish_to_neon.py     batch sync local PG → Neon (full/upsert/incremental)
 ├── dbt/dataco_analytics/
 │   ├── macros/               generate_schema_name.sql (schema naming override)
 │   ├── models/
@@ -92,7 +111,7 @@ Airflow UI: `localhost:8080` (admin/admin) · pgAdmin: `localhost:5050` (admin@a
 │   │           └── schema.yml           31 dbt tests
 │   └── profiles.yml          (gitignored)
 ├── ml/
-│   ├── config.py             POSTGRES_URI, paths
+│   ├── config.py             POSTGRES_URI, NEON_URI, paths
 │   ├── feature_engineering.py  load + validate + profile from Gold AI
 │   ├── train.py              ExtraTreesClassifier, SMOTE, threshold sweep
 │   ├── predict.py            production prediction (PULL from Gold AI, PUSH to predictions)
@@ -100,7 +119,7 @@ Airflow UI: `localhost:8080` (admin/admin) · pgAdmin: `localhost:5050` (admin@a
 │   ├── utils.py              logging helper
 │   ├── saved_models/         fraud_model.pkl (gitignored)
 │   └── reports/              metrics, plots (gitignored)
-├── airflow/dags/             supply_chain_pipeline.py
+├── airflow/dags/             supply_chain_pipeline.py (6-task DAG incl. predict + publish_to_neon)
 ├── docker-compose.yml        postgres, pgadmin, airflow
 └── .gitignore
 ```
@@ -114,19 +133,19 @@ Airflow UI: `localhost:8080` (admin/admin) · pgAdmin: `localhost:5050` (admin@a
 - ✅ Incremental `fact_order_items` (dbt incremental, merge on `order_item_id`)
 - ✅ Gold AI feature table (`warehouse.fraud_features` — 24 features, 30 columns)
 - ✅ Great Expectations-style validation (incremental, etl_run_id watermark)
-- ✅ Apache Airflow orchestration (daily, 4-task DAG)
-- ✅ ML fraud detection (ExtraTreesClassifier, ROC-AUC 0.9552, 24 features)
+- ✅ Apache Airflow orchestration (daily, 6-task DAG)
+- ✅ ML fraud detection (ExtraTreesClassifier, ROC-AUC 0.9497, 24 features, threshold 0.30)
 - ✅ Production predictions (`warehouse.predictions`, upsert-safe, idempotent)
+- ✅ Neon publishing layer (6-table sync, 3 modes: full/upsert/incremental)
 - ✅ Audit columns (`raw.orders_raw`: `etl_run_id` + `ingested_at`; `warehouse.predictions`: `created_at` + `modified_at`)
 - ✅ Docker (`docker compose up`, no manual setup)
 - ✅ 51 dbt tests (includes 4 FK relationship tests)
-- ✅ Power BI dashboard (planned: Fraud Risk page using `warehouse.predictions`)
+- ✅ Power BI / Tableau dashboard (via Neon read-only serving)
 
 ---
 
 ## 5. Future Improvements
 
-- **Power BI Fraud Risk page** — dashboard `warehouse.predictions` (predicted fraud rate, model confidence distribution, flagged high-risk orders)
 - Slowly Changing Dimension (SCD Type 2) on `dim_customers`, via `dbt snapshot`
 - CDC (Debezium/Kafka) instead of full CSV reloads
 - Cloud deployment (AWS/GCP/Azure) + Terraform
@@ -341,3 +360,46 @@ python train.py                           # retrain → saves fraud_model.pkl + 
 python predict.py --order-id 5349         # predict one order (upsert)
 python predict.py --all-new               # predict all unscored orders (idempotent)
 ```
+
+---
+
+## 9. Neon Publishing Layer
+
+Read-only Neon database serves as the BI connection point for Tableau/Power BI. Local PostgreSQL remains the source of truth.
+
+### Setup
+
+1. Create a free Neon project at [neon.tech](https://neon.tech) and copy the connection string
+2. Add to `.env`:
+   ```
+   NEON_HOST=ep-xxx-yyy.region.aws.neon.tech
+   NEON_PORT=5432
+   NEON_DATABASE=neondb
+   NEON_USER=neondb_owner
+   NEON_PASSWORD=your-password
+   ```
+3. Create tables in Neon:
+   ```bash
+   psql "postgresql://neondb_owner:your-password@ep-xxx-yyy.region.aws.neon.tech/neondb" \
+     < scripts/create_neon_schema.sql
+   ```
+
+### Sync modes (`config/sync_tables.yml`)
+
+| Table | Sync Mode | Logic |
+|---|---|---|
+| `dim_customers` | **full** | Skip if PK count matches; else DELETE + INSERT |
+| `dim_products` | **full** | Same as above |
+| `dim_date` | **full** | Same as above |
+| `dim_shipping_location` | **full** | Same as above |
+| `fact_order_items` | **upsert** | Diff PKs, insert only new rows (append-only, no merge needed) |
+| `predictions` | **incremental** | `WHERE modified_at > MAX(modified_at)` in Neon |
+
+### Usage
+
+```bash
+python scripts/publish_to_neon.py                  # incremental sync (default)
+python scripts/publish_to_neon.py --full-sync      # force full sync on all tables
+```
+
+The Airflow DAG runs `publish_to_neon.py` as the final task after `predict`.

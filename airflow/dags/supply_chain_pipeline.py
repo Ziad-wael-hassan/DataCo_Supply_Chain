@@ -3,7 +3,7 @@ supply_chain_pipeline
 ======================
 Orchestrates the DataCo supply chain pipeline end to end:
 
-    load_raw.py  -->  dbt run  -->  dbt test
+    load_raw.py  -->  validate_raw  -->  dbt run  -->  dbt test  -->  predict  -->  publish_to_neon
 
 Each stage is a separate task so failures are isolated and visible in the
 Airflow UI (e.g. you'll immediately see "dbt_test failed" rather than a
@@ -30,18 +30,18 @@ default_args = {
     "owner": "data-eng",
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
-    "email_on_failure": False,  # flip to True + set 'email' key once you wire up alerting
+    "email_on_failure": False,
 }
 
 with DAG(
     dag_id="supply_chain_pipeline",
-    description="Load raw DataCo CSV -> dbt run -> dbt test",
+    description="Load raw DataCo CSV -> validate -> dbt -> predict -> publish to Neon",
     default_args=default_args,
     schedule="@daily",
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,
-    tags=["dataco", "warehouse", "dbt"],
+    tags=["dataco", "warehouse", "dbt", "ml", "neon"],
 ) as dag:
 
     load_raw = BashOperator(
@@ -70,4 +70,14 @@ with DAG(
         ),
     )
 
-    load_raw >> validate_raw >> dbt_run >> dbt_test
+    predict = BashOperator(
+        task_id="predict",
+        bash_command=f"cd {PROJECT_ROOT}/ml && python predict.py --all-new",
+    )
+
+    publish_to_neon = BashOperator(
+        task_id="publish_to_neon",
+        bash_command=f"cd {PROJECT_ROOT} && python scripts/publish_to_neon.py",
+    )
+
+    load_raw >> validate_raw >> dbt_run >> dbt_test >> predict >> publish_to_neon

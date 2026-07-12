@@ -29,6 +29,15 @@ POSTGRES_URI: str = os.getenv(
 )
 
 # ---------------------------------------------------------------------------
+# Neon (read-only serving database for BI dashboards)
+# ---------------------------------------------------------------------------
+NEON_HOST: str = os.getenv("NEON_HOST", "")
+NEON_PORT: str = os.getenv("NEON_PORT", "5432")
+NEON_DATABASE: str = os.getenv("NEON_DATABASE", "")
+NEON_USER: str = os.getenv("NEON_USER", "")
+NEON_PASSWORD: str = os.getenv("NEON_PASSWORD", "")
+
+# ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 ML_DIR: Path = Path(__file__).resolve().parent
