@@ -234,8 +234,22 @@ def main():
 
     # --- 2. CSV + staging + etl_run_id stamp -----------------------------
     df = _read_csv()
+    csv_rows = len(df)
     already_loaded = _count_existing(engine)
     log.info("Already loaded       : %d", already_loaded)
+
+    # Short-circuit: if the source CSV is append-only and every row is
+    # already in raw.orders_raw, skip the staging/insert cycle entirely.
+    if already_loaded == csv_rows:
+        log.info("-----------------------------------")
+        log.info("No new rows detected (%d/%d). Skipping load.",
+                 already_loaded, csv_rows)
+        log.info("-----------------------------------")
+        end_ts = datetime.now()
+        duration_ms = int((time.time() - start) * 1000)
+        _finalize_etl_run(engine, run_id, end_ts, duration_ms, rows_loaded=0)
+        log.info("Done. run_id=%d", run_id)
+        return
 
     _load_staging(engine, df, run_id)
 

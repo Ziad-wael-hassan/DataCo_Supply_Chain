@@ -28,9 +28,6 @@ ml/reports/*.txt
 ml/reports/*.csv
 ml/.env
 
-# Data (keep raw CSV out of git if large; use data/sample/ for a small sample instead)
-raw/*.csv
-
 # Old notebooks (not part of pipeline)
 /models/
 
