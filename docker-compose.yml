@@ -6,10 +6,18 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/postgres
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    HOME: /home/airflow
     PROJECT_ROOT: /opt/airflow/project
     DBT_PROJECT_DIR: /opt/airflow/project/dbt/dataco_analytics
     DBT_PROFILES_DIR: /opt/airflow/dbt_profiles
     POSTGRES_URI: postgresql://postgres:postgres@postgres:5432/postgres
+    TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-${telegramebot:-}}
+    TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-${chat_id:-}}
+    NEON_HOST: ${NEON_HOST:-}
+    NEON_PORT: ${NEON_PORT:-5432}
+    NEON_DATABASE: ${NEON_DATABASE:-}
+    NEON_USER: ${NEON_USER:-}
+    NEON_PASSWORD: ${NEON_PASSWORD:-}
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
