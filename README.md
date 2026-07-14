@@ -1,6 +1,6 @@
 <div align="center">
 
-# DataCo Supply Chain — Data Engineering + ML Platform
+# DataCo Supply Chain — Data Engineering 
 
 **End-to-end data platform that turns a raw 180k-row CSV export into a governed Kimball warehouse, a fraud-detection model, and live BI dashboards — fully orchestrated and containerized.**
 
