@@ -4,18 +4,22 @@
 
 **End-to-end data platform that turns a raw 180k-row CSV export into a governed Kimball warehouse, a fraud-detection model, and live BI dashboards — fully orchestrated and containerized.**
 
-[Demo](#demo) •
-[Architecture](docs/ARCHITECTURE.md) •
-[Installation](#installation) •
-[Documentation](#documentation)
-
 <br>
 
-<!-- Badges here -->
+[![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Airflow](https://img.shields.io/badge/Airflow-017CEE?style=flat&logo=apacheairflow&logoColor=white)](https://airflow.apache.org/)
+[![dbt](https://img.shields.io/badge/dbt-FF694B?style=flat&logo=dbt&logoColor=white)](https://www.getdbt.com/)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
+[![Neon](https://img.shields.io/badge/Neon-00E599?style=flat&logo=neon&logoColor=white)](https://neon.tech/)
+[![Metabase](https://img.shields.io/badge/Metabase-509EE3?style=flat&logo=metabase&logoColor=white)](https://www.metabase.com/)
+[![scikit-learn](https://img.shields.io/badge/scikit--learn-F7931E?style=flat&logo=scikitlearn&logoColor=white)](https://scikit-learn.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
 
 ---
+
 ## Overview
 
 > **What is this?** A production-style pipeline that ingests the [DataCo Smart Supply Chain](https://www.kaggle.com/datasets/shashwatwork/dataco-smart-supply-chain-for-big-data-analysis) dataset (~180k order line items), models it as a Kimball star schema, engineers a Gold AI feature layer, trains a fraud-detection classifier, and serves everything to BI tools through a cloud-hosted read replica.
