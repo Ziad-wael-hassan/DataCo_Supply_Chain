@@ -1,108 +1,57 @@
 # Architecture
 
-This document describes every layer of the DataCo Supply Chain Analytics platform — from raw CSV ingestion through ML prediction and live dashboard serving.
+Full technical reference for the DataCo Supply Chain platform — medallion layers, schemas, pipeline lifecycle, ML workflow, and Kimball dimensional design.
 
 ---
 
-## Medallion Architecture
+## Table of Contents
 
-```mermaid
-flowchart LR
-    subgraph Bronze["Bronze Layer"]
-        CSV["Raw CSV\n180,519 rows"]
-    end
-    subgraph Silver["Silver Layer"]
-        STG["stg_orders\nCleaned, typed, deduplicated"]
-    end
-    subgraph Gold["Gold Layer"]
-        DIM_C["dim_customers"]
-        DIM_P["dim_products"]
-        DIM_D["dim_date"]
-        DIM_S["dim_shipping_location"]
-        FACT["fact_order_items"]
-    end
-    subgraph Gold_AI["Gold AI Layer"]
-        FF["fraud_features\n24 ML features + target"]
-        PRED["predictions\n65,752 scored orders"]
-    end
-    subgraph Serving["Serving Layer"]
-        NEON[("Neon Cloud")]
-        TAB["Tableau"]
-        MB["Metabase"]
-    end
+- [Medallion Architecture](#medallion-architecture)
+- [Folder Structure](#folder-structure)
+- [Pipeline Lifecycle](#pipeline-lifecycle)
+- [Kimball Dimensional Model](#kimball-dimensional-model)
+- [Database Schemas](#database-schemas)
+- [Data Dictionary](#data-dictionary)
+- [dbt Lineage](#dbt-lineage)
+- [ML Workflow](#ml-workflow)
+- [Neon Sync Strategy](#neon-sync-strategy)
+- [Telegram Notifications](#telegram-notifications)
+- [Airflow DAG](#airflow-dag)
+- [Incremental Strategy](#incremental-strategy)
+- [Error Handling](#error-handling)
+- [Environment Variables & Services](#environment-variables--services)
+- [Design Notes & Future Improvements](#design-notes--future-improvements)
 
-    CSV --> STG --> DIM_C & DIM_P & DIM_D & DIM_S --> FACT
-    FACT --> FF --> PRED
-    FACT & PRED --> NEON --> TAB & MB
-```
 
----
 
 ## Folder Structure
 
 ```
 .
-├── airflow/
-│   └── dags/
-│       └── supply_chain_pipeline.py     # 7-task Airflow DAG
-├── config/
-│   └── sync_tables.yml                  # Neon sync table registry
-├── dbt/
-│   └── dataco_analytics/
-│       ├── dbt_project.yml
-│       ├── packages.yml                 # dbt_utils 1.4.1
-│       ├── macros/
-│       │   └── generate_schema_name.sql # Schema override
-│       └── models/
-│           ├── staging/
-│           │   └── stg_orders.sql       # Silver cleaning layer
-│           ├── marts/
-│           │   ├── dim_customers.sql
-│           │   ├── dim_products.sql
-│           │   ├── dim_date.sql
-│           │   ├── dim_shipping_location.sql
-│           │   ├── fact_order_items.sql # Incremental
-│           │   └── schema.yml           # 31 dbt tests
-│           └── ai/
-│               ├── fraud_features.sql   # Gold AI feature store
-│               └── schema.yml
-├── docker/
-│   └── airflow.Dockerfile
-├── docs/
-│   ├── ARCHITECTURE.md                  # This file
-│   ├── SETUP.md
-│   └── DEMO_RECORDING_GUIDE.md
+├── airflow/dags/supply_chain_pipeline.py     7-task Airflow DAG
+├── config/sync_tables.yml                    Neon sync table registry
+├── dbt/dataco_analytics/
+│   ├── macros/generate_schema_name.sql       Schema override
+│   └── models/
+│       ├── staging/stg_orders.sql            Silver cleaning layer
+│       ├── marts/                            dim_*, fact_order_items, schema.yml (31 tests)
+│       └── ai/fraud_features.sql             Gold AI feature store
+├── docker/airflow.Dockerfile
+├── docs/                                     Architecture & data docs (this file)
 ├── ml/
-│   ├── config.py
-│   ├── feature_engineering.py           # Direct SQL → DataFrame
-│   ├── train.py                         # Model training
-│   ├── predict.py                       # Production prediction
-│   ├── threshold_optimization.py
-│   ├── saved_models/
-│   │   └── fraud_model.pkl             # Serialized inference artifact
-│   └── reports/
-│       ├── metrics.json
-│       ├── confusion_matrix.png
-│       └── roc_curve.png
-├── notifications/
-│   ├── callbacks.py
-│   ├── notifier.py
-│   ├── formatter.py
-│   ├── providers.py
-│   ├── metrics.py
-│   └── history.py
+│   ├── config.py, feature_engineering.py
+│   ├── train.py, predict.py, threshold_optimization.py
+│   ├── saved_models/fraud_model.pkl          Serialized inference artifact
+│   └── reports/                              metrics.json, confusion_matrix.png, roc_curve.png
+├── notifications/                            callbacks, notifier, formatter, providers, metrics, history
 ├── scripts/
-│   ├── load_raw.py
-│   ├── validate_raw.py
-│   ├── publish_to_neon.py
-│   ├── create_neon_schema.sql
+│   ├── load_raw.py, validate_raw.py
+│   ├── publish_to_neon.py, create_neon_schema.sql
 │   └── create_notifications_log.sql
-├── raw/
-│   └── DataCoSupplyChainDataset.csv
+├── raw/DataCoSupplyChainDataset.csv
 ├── docker-compose.yml
 ├── requirements.txt
-├── Makefile
-└── .env.example
+└── Makefile
 ```
 
 ---
@@ -186,197 +135,11 @@ stateDiagram-v2
 
 ---
 
-## Database Schemas
+## Kimball Dimensional Model
 
-### PostgreSQL (Local)
+The warehouse follows a **classic star schema**: one central fact table (`fact_order_items`), four denormalized dimensions joined by single-hop foreign keys, and no snowflaking. This shape optimizes for BI read performance and business-user comprehension rather than write-side normalization.
 
-#### `raw.orders_raw`
-
-Source data loaded from CSV. Append-only, never modified.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| order_item_id | integer | Primary key (source) |
-| order_id | integer | Order identifier |
-| customer_id | integer | Customer reference |
-| order_date | date | Order placement date |
-| order_status | text | **SUSPECTED_FRAUD** or NORMAL |
-| sales | double precision | Line item revenue |
-| benefit_per_order | double precision | Profit/loss per item |
-| order_item_quantity | integer | Units ordered |
-| payment_type | text | Payment method |
-| shipping_mode | text | Shipping tier |
-| shipping_date | date | Shipment date |
-| delivery_status | text | Delivery status |
-| category_name | text | Product category |
-| department_name | text | Department |
-| product_card_id | integer | Product reference |
-| product_price | double precision | Unit price |
-| order_item_total | double precision | Total for line item |
-| order_profit_per_order | double precision | Profit for line item |
-| order_item_discount | double precision | Discount amount |
-| order_item_discount_rate | double precision | Discount rate |
-| order_item_profit_ratio | double precision | Profit margin |
-| sales_per_customer | double precision | Revenue per customer |
-| customer_first_name | text | First name |
-| customer_last_name | text | Last name |
-| customer_segment | text | Segment |
-| customer_city | text | City |
-| customer_state | text | State |
-| customer_country | text | Country |
-| customer_street | text | Street address |
-| customer_zipcode | text | Zipcode |
-| order_city | text | Order city |
-| order_state | text | Order state |
-| order_country | text | Order country |
-| order_region | text | Order region |
-| order_zipcode | text | Order zipcode |
-| latitude | double precision | Latitude |
-| longitude | double precision | Longitude |
-| validation_status | text | pending / in_progress / passed / failed |
-| etl_run_id | integer | Foreign key to etl_runs |
-
-#### `warehouse.dim_customers`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| customer_id | integer | Primary key |
-| customer_first_name | text | First name |
-| customer_last_name | text | Last name |
-| customer_segment | text | Segment |
-| customer_city | text | City |
-| customer_state | text | State |
-| customer_country | text | Country |
-| customer_street | text | Street address |
-| customer_zipcode | text | Zipcode |
-
-#### `warehouse.dim_products`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| product_card_id | integer | Primary key |
-| product_name | text | Product name |
-| product_price | double precision | Unit price |
-| product_status | integer | Status flag |
-| category_id | integer | Category reference |
-| category_name | text | Category name |
-| department_id | integer | Department reference |
-| department_name | text | Department name |
-
-#### `warehouse.dim_date`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| date_key | integer | Primary key (YYYYMMDD) |
-| full_date | date | Date value |
-| year | numeric | Year |
-| quarter | numeric | Quarter (1-4) |
-| month | numeric | Month (1-12) |
-| month_name | text | Month name |
-| week | numeric | ISO week |
-| day | numeric | Day of month |
-| is_weekend | boolean | Weekend flag |
-
-#### `warehouse.dim_shipping_location`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| shipping_location_id | text | Primary key |
-| order_city | text | City |
-| order_state | text | State |
-| order_country | text | Country |
-| order_zipcode | text | Zipcode |
-| latitude | double precision | Latitude |
-| longitude | double precision | Longitude |
-| order_region | text | Region |
-
-#### `warehouse.fact_order_items`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| order_item_id | integer | Primary key |
-| order_id | integer | Order identifier |
-| customer_id | integer | FK → dim_customers |
-| product_card_id | integer | FK → dim_products |
-| date_key | integer | FK → dim_date |
-| shipping_location_id | text | FK → dim_shipping_location |
-| payment_type | text | Payment method |
-| order_status | text | Order status |
-| shipping_mode | text | Shipping tier |
-| order_date | date | Order date |
-| sales | double precision | Revenue |
-| benefit_per_order | double precision | Profit/loss |
-| order_item_quantity | integer | Units |
-
-#### `warehouse.fraud_features`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| order_item_id | integer | Primary key |
-| order_id | integer | Order identifier |
-| sales | double precision | Revenue |
-| customer_segment | text | Segment |
-| product_price | double precision | Unit price |
-| category_name | text | Category |
-| department_name | text | Department |
-| order_item_quantity | integer | Units |
-| payment_type | text | Payment method |
-| shipping_mode | text | Shipping tier |
-| order_region | text | Region |
-| order_country | text | Country |
-| sales_per_customer | double precision | Revenue per customer |
-| benefit_per_order | double precision | Profit/loss |
-| order_profit_per_order | double precision | Order-level profit |
-| order_item_total | double precision | Line total |
-| order_item_discount | double precision | Discount amount |
-| order_item_discount_rate | double precision | Discount rate |
-| order_item_profit_ratio | double precision | Profit margin |
-| order_month | numeric | Month (1-12) |
-| order_day | numeric | Day of month |
-| order_hour | numeric | Hour |
-| order_day_of_week | numeric | Day of week |
-| is_weekend | boolean | Weekend flag |
-| latitude | double precision | Latitude |
-| longitude | double precision | Longitude |
-| target | integer | 1 = SUSPECTED_FRAUD, 0 = else |
-
-#### `warehouse.predictions`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| prediction_id | integer | Primary key (SERIAL) |
-| order_id | integer | UNIQUE — FK → fact_order_items |
-| fraud_probability | double precision | Model output probability |
-| predicted_label | boolean | threshold 0.30 → 1/0 |
-| threshold_used | double precision | 0.30 |
-| model_version | varchar | "1.1.0" |
-| predicted_at | timestamp | Prediction timestamp |
-| created_at | timestamp | Row creation |
-| modified_at | timestamp | Row modification |
-
-#### `warehouse.etl_runs`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| run_id | integer | Primary key (SERIAL) |
-| started_at | timestamp | Run start |
-| finished_at | timestamp | Run end |
-| status | text | running / succeeded / failed |
-
-#### `warehouse.notifications_log`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| notification_id | integer | Primary key (SERIAL) |
-| etl_run_id | integer | FK → etl_runs |
-| event_type | text | started / success / failure / model_retrained |
-| channel | text | telegram |
-| status | text | sent / failed |
-| created_at | timestamp | Log timestamp |
-
----
-
-## Data Model (ERD)
+**Grain:** one row = one order line item (`order_item_id`) — the most atomic level available in the source data. Every higher-level aggregate (daily, monthly, by customer, by region) rolls up from this grain.
 
 ```mermaid
 erDiagram
@@ -389,50 +152,26 @@ erDiagram
 
     dim_customers {
         int customer_id PK
-        text customer_first_name
-        text customer_last_name
         text customer_segment
-        text customer_city
-        text customer_state
         text customer_country
-        text customer_street
-        text customer_zipcode
     }
-
     dim_products {
         int product_card_id PK
-        text product_name
-        double product_price
-        int product_status
-        int category_id
         text category_name
-        int department_id
         text department_name
     }
-
     dim_date {
         int date_key PK
-        date full_date
         numeric year
-        numeric quarter
         numeric month
-        text month_name
-        numeric week
-        numeric day
         boolean is_weekend
     }
-
     dim_shipping_location {
         text shipping_location_id PK
-        text order_city
-        text order_state
-        text order_country
-        text order_zipcode
+        text order_region
         double latitude
         double longitude
-        text order_region
     }
-
     fact_order_items {
         int order_item_id PK
         int order_id
@@ -440,37 +179,131 @@ erDiagram
         int product_card_id FK
         int date_key FK
         text shipping_location_id FK
-        text payment_type
-        text order_status
-        text shipping_mode
-        timestamp order_date
         double sales
-        double benefit_per_order
         int order_item_quantity
     }
-
-    fraud_features {
-        int order_item_id PK
-        int order_id
-        double sales
-        text customer_segment
-        double product_price
-        text category_name
-        text department_name
-        boolean is_weekend
-        int target
-    }
-
-    predictions {
-        int prediction_id PK
-        int order_id UK
-        double fraud_probability
-        boolean predicted_label
-        double threshold_used
-        varchar model_version
-        timestamp predicted_at
-    }
 ```
+
+| Table | Why it's a Fact / Dimension |
+|---|---|
+| `fact_order_items` | Holds numeric, additive **measures** (Sales, Profit, Discount, Quantity) plus only foreign keys — the signature of a fact table. |
+| `dim_date` | Slowly-changing calendar attributes tied to a surrogate key. Type 0 — calendar facts never change. |
+| `dim_customers` | Descriptive attributes answering "who" — segment, geography. Type 1 (overwrite). |
+| `dim_products` | Descriptive attributes answering "what" — name, price, category, department. Type 1. |
+| `dim_shipping_location` | Descriptive attributes answering "where/how" — destination geography, shipping mode. |
+
+### Measure additivity
+
+| Measure | Type | Notes |
+|---|---|---|
+| `sales`, `order_item_total`, `order_item_discount`, `order_item_quantity` | **Fully additive** | Summable across any dimension. |
+| `sales_per_customer` | **Non-additive** | Recalculate as `SUM(sales)/COUNT(DISTINCT customer)`. |
+| `benefit_per_order`, `order_profit_per_order` | **Semi-additive** | Order-level values repeated per line item. |
+| `order_item_discount_rate`, `order_item_profit_ratio` | **Non-additive** | Ratios — use weighted averages, never sum. |
+| `days_for_shipping_real`, `days_for_shipment_scheduled` | **Non-additive** | Duration metrics — average/median only. |
+
+**Degenerate dimensions** (no separate table, live directly on the fact row): `payment_type`, `delivery_status`, `order_status`.
+
+---
+
+## Database Schemas
+
+### `raw.orders_raw`
+Landing table — raw CSV columns preserved as-is, plus audit columns (`etl_run_id`, `ingested_at`, `validation_status`).
+
+### `staging.stg_orders`
+dbt view performing cleaning, renaming, and typing (silver layer).
+
+### `warehouse.dim_customers`
+One row per customer (deduplicated to most recent order's attributes). PK: `customer_id`.
+
+### `warehouse.dim_products`
+One row per product. PK: `product_card_id`.
+
+### `warehouse.dim_date`
+One row per calendar date present in the order data. PK: `date_key` (`YYYYMMDD`).
+
+### `warehouse.dim_shipping_location`
+Shipping destination dimension with a surrogate key (`dbt_utils.generate_surrogate_key`). PK: `shipping_location_id`.
+
+### `warehouse.fact_order_items`
+Grain: one row per order item. Incremental (merge on `order_item_id`). FKs into all four dimensions above.
+
+### `warehouse.fraud_features`
+Gold AI layer — single source of truth for ML. All feature engineering (joins, temporal derivation, leakage/PII exclusion, target computation) happens in SQL.
+
+**Excluded (leakage):** `delivery_status`, `late_delivery_risk`, `days_for_shipping_real`, `shipping_date`, `days_for_shipment_scheduled`
+**Excluded (PII):** `customer_first_name`, `customer_last_name`, `customer_street`, `customer_city`, `customer_zipcode`
+
+### `warehouse.predictions`
+One row per order, upsert-safe (`ON CONFLICT (order_id) DO UPDATE`).
+
+### `warehouse.etl_runs`
+Pipeline run monitoring — one row per `load_raw.py` execution.
+
+### `warehouse.notifications_log`
+Telegram notification audit trail (event type, channel, status, timestamp).
+
+---
+
+## Data Dictionary
+
+<details>
+<summary><strong>fact_order_items</strong> — full column list</summary>
+
+| Column | Type | Description |
+|---|---|---|
+| order_item_id | int, PK | Unique order item identifier |
+| order_id | int, FK | Parent order identifier |
+| customer_id | int, FK → dim_customers | Customer who placed the order |
+| product_card_id | int, FK → dim_products | Product ordered |
+| date_key | int, FK → dim_date | Order date key |
+| shipping_location_id | varchar, FK → dim_shipping_location | Shipping destination |
+| payment_type | varchar | Payment method |
+| delivery_status | varchar | Delivery outcome (Late, On Time) |
+| order_status | varchar | COMPLETE, CANCELED, SUSPECTED_FRAUD |
+| late_delivery_risk | int | Binary flag (0/1) |
+| shipping_mode | varchar | Shipping method |
+| order_date / shipping_date | timestamp | Placement / ship dates |
+| days_for_shipping_real / days_for_shipment_scheduled | float | Actual vs. scheduled shipping days |
+| sales, sales_per_customer, benefit_per_order, order_profit_per_order | float | Financial measures |
+| order_item_total, order_item_discount, order_item_discount_rate, order_item_profit_ratio | float | Line-item financials |
+| order_item_quantity | int | Quantity (≥ 1) |
+
+</details>
+
+<details>
+<summary><strong>fraud_features</strong> (Gold AI) — full column list</summary>
+
+| Column | Type | Description |
+|---|---|---|
+| order_item_id, order_id, customer_id | int | Identifiers |
+| payment_type, shipping_mode, customer_segment, category_name, department_name, order_region, order_country | varchar | Categorical features |
+| order_item_quantity, sales, sales_per_customer, benefit_per_order, order_profit_per_order, order_item_total, order_item_discount, order_item_discount_rate, order_item_profit_ratio, product_price, latitude, longitude | numeric | Numerical features |
+| order_month, order_day, order_hour, order_day_of_week | int | Temporal features |
+| is_weekend | boolean | Weekend flag |
+| order_status | varchar | Raw status text (dropped before training) |
+| target | int | 1 = SUSPECTED_FRAUD, 0 = clean |
+| created_at | timestamp | Row creation timestamp |
+
+</details>
+
+<details>
+<summary><strong>predictions</strong> — full column list</summary>
+
+| Column | Type | Description |
+|---|---|---|
+| prediction_id | serial, PK | Auto-incrementing ID |
+| order_id | int, UNIQUE | Order identifier |
+| fraud_probability | float | Model output probability (0–1) |
+| predicted_label | boolean | True if fraud (threshold applied) |
+| threshold_used | float | Classification threshold (0.30) |
+| model_version, pipeline_version | varchar | Version strings |
+| predicted_at, created_at, modified_at | timestamp | Lifecycle timestamps |
+
+</details>
+
+**Data quality note:** 412 rows have negative `sales` values. Investigated and confirmed these correspond exclusively to `CANCELED` and `SUSPECTED_FRAUD` order statuses — a legitimate refund/loss signal, not bad data. Preserved (not filtered); validation scopes the "sales ≥ 0" rule to exclude those statuses.
 
 ---
 
@@ -488,12 +321,9 @@ flowchart TD
     FF --> PRED["ML: fraud_model.pkl\nPredictions"]
 ```
 
-**Schema override:** `macros/generate_schema_name.sql` routes models:
-- `staging` → `warehouse.stg_orders`
-- `marts` → `warehouse.dim_customers`, `warehouse.fact_order_items`, etc.
-- `ai` → `warehouse.fraud_features`
+**Schema override** (`macros/generate_schema_name.sql`): `staging` → `warehouse.stg_orders`; `marts` → `warehouse.dim_*` / `fact_order_items`; `ai` → `warehouse.fraud_features`.
 
-**Tests:** 31 dbt tests enforce uniqueness, not-null, and referential integrity across all warehouse tables.
+**Tests:** 31 dbt tests enforce uniqueness, not-null, and referential integrity (including 4 FK relationship tests) across all warehouse tables.
 
 ---
 
@@ -512,10 +342,8 @@ flowchart TD
     METRICS --> SERIALIZE["Serialize fraud_model.pkl\nmodel + encoder + features + threshold"]
 ```
 
-**Key details:**
-
 | Component | Detail |
-|-----------|--------|
+|---|---|
 | Model | ExtraTreesClassifier (300 estimators) |
 | Features | 24 columns (payment, shipping, geography, temporal, financial) |
 | Threshold | 0.30 (optimized via sweep 0.05–0.95) |
@@ -523,23 +351,50 @@ flowchart TD
 | Encoding | OrdinalEncoder (tree-safe, no one-hot) |
 | Split | Stratified 80/20 (random_state=42) |
 | Target | `order_status = 'SUSPECTED_FRAUD'` → 1, else 0 |
-| Class Balance | 2.25% fraud (4,066 / 180,519) → 43.4:1 imbalance |
+| Class balance | 2.25% fraud (4,066 / 180,519) → 43.4:1 imbalance |
 | Inference artifact | `fraud_model.pkl` — model + fitted OrdinalEncoder + feature_columns + threshold + model_version |
+
+### Performance (test set, 36,144 rows)
+
+| Metric | Value |
+|---|---|
+| Precision | 0.4013 |
+| Recall | 0.3727 |
+| F1 | 0.3865 |
+| ROC-AUC | 0.9497 |
+
+### Usage
+
+```bash
+python train.py                     # retrain → saves fraud_model.pkl + reports
+python predict.py --order-id 5349   # predict one order (upsert)
+python predict.py --all-new         # predict all unscored orders (idempotent)
+```
 
 ---
 
 ## Neon Sync Strategy
 
-| Table | Sync Mode | PK Strategy | Excludes | Rationale |
-|-------|-----------|-------------|----------|-----------|
-| dim_customers | full | `customer_id` | — | Low cardinality (20K rows), full refresh fast |
-| dim_products | full | `product_card_id` | — | Tiny (118 rows), full refresh instant |
-| dim_date | full | `date_key` | — | Static (1,127 rows), never changes |
-| dim_shipping_location | full | `shipping_location_id` | — | Moderate (65K rows), full refresh acceptable |
-| fact_order_items | upsert | `order_item_id` | — | Large (180K+), append-only with upsert for PK diff |
-| predictions | incremental | `order_id` | `prediction_id` | 65K+ rows, modified_at delta; SERIAL excluded from INSERT |
+| Table | Sync Mode | PK Strategy | Rationale |
+|---|---|---|---|
+| dim_customers | full | `customer_id` | Low cardinality (~20K rows), full refresh fast |
+| dim_products | full | `product_card_id` | Tiny (118 rows), instant refresh |
+| dim_date | full | `date_key` | Static (1,127 rows), never changes |
+| dim_shipping_location | full | `shipping_location_id` | Moderate (~65K rows), acceptable full refresh |
+| fact_order_items | upsert | `order_item_id` | Large (180K+), append-only with PK diff |
+| predictions | incremental | `order_id` | 65K+ rows, `modified_at` delta; SERIAL excluded from INSERT |
 
-**`_reset_neon_sequences()`**: Before upserting predictions, resets the Neon SERIAL sequence to `MAX(prediction_id) + 1` to avoid conflicts.
+`_reset_neon_sequences()` resets the Neon SERIAL sequence to `MAX(prediction_id) + 1` before upserting predictions to avoid conflicts.
+
+### Setup
+
+```bash
+psql "postgresql://neondb_owner:<password>@ep-xxx-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require" \
+  -f scripts/create_neon_schema.sql
+
+python scripts/publish_to_neon.py               # incremental sync (default)
+python scripts/publish_to_neon.py --full-sync   # force full sync
+```
 
 ---
 
@@ -550,56 +405,36 @@ sequenceDiagram
     participant DAG as Airflow DAG
     participant CB as callbacks.py
     participant NM as notifier.py
-    participant FM as formatter.py
     participant TG as Telegram API
 
     DAG->>CB: on_dag_start()
     CB->>NM: notify_started()
-    NM->>FM: build_telegram_message("started", ...)
-    FM-->>NM: HTML message
     NM->>TG: send_message()
-    TG-->>NM: 200 OK
 
     DAG->>CB: on_task_success()
     CB->>NM: notify_success()
     NM->>TG: send_message()
 
     DAG->>CB: on_dag_failure()
-    CB->>NM: notify_failure()
-    CB->>NM: notify_retry()
-    NM->>TG: send_message()
-
-    Note over DAG,TG: Model retrain trigger
-    DAG->>NM: notify_model_retrained()
+    CB->>NM: notify_failure() / notify_retry()
     NM->>TG: send_message()
 ```
 
-**Message format:** Enterprise-style HTML with sections (Pipeline Started, Pipeline Summary, Pipeline Failed, Model Retrained).
+Enterprise-style HTML messages cover: Pipeline Started, Pipeline Summary, Pipeline Failed, and Model Retrained events.
 
 ---
 
 ## Airflow DAG
 
-**DAG:** `supply_chain_pipeline`  
-**Schedule:** `@daily` (manual triggers also supported)  
-**Retries:** 2 per task, 5-min delay  
-**Callbacks:** Telegram notifications on start, success, failure, and retry
+**DAG:** `supply_chain_pipeline` · **Schedule:** `@daily` · **Retries:** 2 per task, 5-min delay
 
 ```mermaid
 flowchart TD
-    NOTIFY_START["notify_start"]
-    LOAD["load_raw"]
-    VALIDATE["validate_raw"]
-    DBT_RUN["dbt_run"]
-    DBT_TEST["dbt_test"]
-    PREDICT["predict"]
-    PUBLISH["publish_to_neon"]
-
-    NOTIFY_START --> LOAD --> VALIDATE --> DBT_RUN --> DBT_TEST --> PREDICT --> PUBLISH
+    NOTIFY_START["notify_start"] --> LOAD["load_raw"] --> VALIDATE["validate_raw"] --> DBT_RUN["dbt_run"] --> DBT_TEST["dbt_test"] --> PREDICT["predict"] --> PUBLISH["publish_to_neon"]
 ```
 
 | Task | Script | Timeout |
-|------|--------|---------|
+|---|---|---|
 | notify_start | `notifications/notifier.py` | 30 sec |
 | load_raw | `scripts/load_raw.py` | 15 min |
 | validate_raw | `scripts/validate_raw.py` | 5 min |
@@ -612,58 +447,66 @@ flowchart TD
 
 ## Incremental Strategy
 
-| Stage | Strategy | Details |
-|-------|----------|---------|
-| **Load** | `NOT EXISTS` on `Order Item Id` | Never re-inserts existing rows; idempotent |
-| **Validate** | Queries `WHERE validation_status = 'in_progress'` | Only validates the current run |
-| **dbt fact** | Incremental merge on `order_item_id` | Updates changed rows, inserts new |
-| **ML predict** | `LEFT JOIN` against `warehouse.predictions` | Only scores unscored orders |
-| **Neon dims** | Full refresh (DELETE + INSERT) | Low cardinality, fast |
-| **Neon fact** | UPSERT on PK | Append-only with PK diff |
-| **Neon predictions** | Incremental by `modified_at` | Only new/changed predictions synced |
+| Stage | Strategy |
+|---|---|
+| Load | `NOT EXISTS` on `order_item_id` — never re-inserts existing rows |
+| Validate | Queries `WHERE validation_status = 'in_progress'` — only the current run |
+| dbt fact | Incremental merge on `order_item_id` |
+| ML predict | `LEFT JOIN` against `warehouse.predictions` — only scores unscored orders |
+| Neon dims | Full refresh (DELETE + INSERT) |
+| Neon fact | UPSERT on PK |
+| Neon predictions | Incremental by `modified_at` |
 
 ---
 
 ## Error Handling
 
 | Stage | Failure Mode | Behavior |
-|-------|-------------|----------|
-| `load_raw.py` | CSV not found | Exits with error, DAG fails |
-| `load_raw.py` | Connection error | Retries 2x, then fails |
+|---|---|---|
+| `load_raw.py` | CSV not found / connection error | DAG fails after 2 retries |
 | `validate_raw.py` | NULL % ≥ 1.5% | Writes `validation_status = 'failed'`, exits non-zero |
 | `validate_raw.py` | 0 pending rows | Exits 0 (skipped) |
-| `dbt run` | Model build error | DAG fails, logs SQL error |
-| `dbt test` | Test failure | DAG fails, logs failed test |
+| `dbt run` / `dbt test` | Build or test failure | DAG fails, logs SQL/test error |
 | `predict.py` | No unscored orders | Exits 0 (skipped) |
-| `predict.py` | Model file missing | Raises FileNotFoundError |
-| `publish_to_neon.py` | Neon connection | Retries, then fails |
-| `publish_to_neon.py` | Sequence conflict | `_reset_neon_sequences()` resets SERIAL before upsert |
+| `predict.py` | Model file missing | Raises `FileNotFoundError` |
+| `publish_to_neon.py` | Connection / sequence conflict | Retries; `_reset_neon_sequences()` resets SERIAL before upsert |
 | Any task | Task failure | Telegram notification with error + retry count |
 
 ---
 
-## Environment Variables
+## Environment Variables & Services
 
-| Variable | Purpose | Required |
-|----------|---------|----------|
-| `DATABASE_URL` | PostgreSQL connection | Yes |
-| `NEON_HOST` | Neon hostname | Yes |
-| `NEON_PORT` | Neon port (5432) | Yes |
-| `NEON_DATABASE` | Neon database name | Yes |
-| `NEON_USER` | Neon username | Yes |
-| `NEON_PASSWORD` | Neon password | Yes |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token | Yes |
-| `TELEGRAM_CHAT_ID` | Telegram chat ID | Yes |
-| `MLFLOW_TRACKING_URI` | MLflow server (optional) | No |
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | PostgreSQL connection |
+| `NEON_HOST`, `NEON_PORT`, `NEON_DATABASE`, `NEON_USER`, `NEON_PASSWORD` | Neon connection |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Telegram alerting |
+| `MLFLOW_TRACKING_URI` | Optional MLflow server |
+
+| Service | Port | Description |
+|---|---|---|
+| PostgreSQL | 5432 | Local database |
+| pgAdmin | 5050 | Database GUI |
+| Airflow | 8080 | Orchestration (admin/admin) |
+| Metabase | 3000 | Open-source BI |
+| Tableau | — | Connects to Neon externally |
 
 ---
 
-## Services
+## Design Notes & Future Improvements
 
-| Service | Port | Description |
-|---------|------|-------------|
-| PostgreSQL | 5432 | Local database |
-| pgAdmin | 5050 | Database GUI |
-| Airflow | 8080 | Pipeline orchestration (admin/admin) |
-| Metabase | 3000 | Open-source BI |
-| Tableau | — | Connect to Neon externally |
+**Known modeling trade-off:** in an earlier iteration of this warehouse, `dim_shipping_location` was keyed directly on `order_id` rather than a deduplicated surrogate key, effectively making it a degenerate dimension rather than a reusable conformed one. The current schema keys it on a `dbt_utils` surrogate key instead, deduplicated on the location attributes — the recommended fix.
+
+Planned improvements:
+
+- **SCD Type 2** on `dim_customers` and `dim_products` via `dbt snapshot`, using `effective_date` / `expiration_date` / `is_current` to track historical segment, address, and price changes.
+- **CDC ingestion** (Debezium/Kafka) to replace full CSV reloads.
+- **Cloud deployment** (AWS/GCP/Azure) with Terraform.
+- **Data lake landing zone** (S3/MinIO) ahead of Postgres.
+- **CI pipeline** running `dbt test`, `validate_raw.py`, and a `train.py` smoke test on every push.
+- **Partitioning** `fact_order_items` by `date_key` (range partitioning) as data volume grows.
+- **Pre-aggregated rollup tables** (e.g., monthly sales by category) for high-traffic executive dashboards.
+
+---
+
+*End of document.*
