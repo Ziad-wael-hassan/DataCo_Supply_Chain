@@ -39,3 +39,5 @@ tables:
     pk: order_id
     sync_mode: incremental
     date_column: modified_at
+    exclude_columns:
+      - prediction_id

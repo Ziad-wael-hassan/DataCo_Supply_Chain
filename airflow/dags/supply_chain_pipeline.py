@@ -14,17 +14,24 @@ aren't hardcoded to one machine:
     PROJECT_ROOT   e.g. /opt/airflow/project      (repo root, contains load_raw.py)
     DBT_PROJECT_DIR e.g. /opt/airflow/project/dbt/dataco_analytics
 """
+import sys
 from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.bash import BashOperator
+from airflow.operators.python import PythonOperator
 
 PROJECT_ROOT = Variable.get("PROJECT_ROOT", default_var="/opt/airflow/project")
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from notifications.callbacks import on_start_callback, on_success_callback, on_failure_callback
+
 DBT_PROJECT_DIR = Variable.get(
     "DBT_PROJECT_DIR", default_var="/opt/airflow/project/dbt/dataco_analytics"
 )
-DBT_PROFILES_DIR = Variable.get("DBT_PROFILES_DIR", default_var="/home/airflow/.dbt")
+DBT_PROFILES_DIR = Variable.get("DBT_PROFILES_DIR", default_var="/opt/airflow/dbt_profiles")
 
 default_args = {
     "owner": "data-eng",
@@ -42,7 +49,17 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     tags=["dataco", "warehouse", "dbt", "ml", "neon"],
+    on_success_callback=on_success_callback,
+    on_failure_callback=on_failure_callback,
 ) as dag:
+
+    def notify_start_wrapper(**context):
+        on_start_callback(context)
+
+    notify_start = PythonOperator(
+        task_id="notify_start",
+        python_callable=notify_start_wrapper,
+    )
 
     load_raw = BashOperator(
         task_id="load_raw",
@@ -80,4 +97,4 @@ with DAG(
         bash_command=f"cd {PROJECT_ROOT} && python scripts/publish_to_neon.py",
     )
 
-    load_raw >> validate_raw >> dbt_run >> dbt_test >> predict >> publish_to_neon
+    notify_start >> load_raw >> validate_raw >> dbt_run >> dbt_test >> predict >> publish_to_neon

@@ -47,6 +47,12 @@ from config import SAVED_MODELS_DIR, REPORTS_DIR
 from feature_engineering import load_dataset, prepare_features
 from utils import get_logger
 
+# Ensure notifications package is discoverable
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from notifications.notifier import send_model_training
+
 log = get_logger("train")
 
 # Columns excluded from the feature matrix X
@@ -252,6 +258,26 @@ metrics_path = REPORTS_DIR / "metrics.json"
 with open(metrics_path, "w") as f:
     json.dump(metrics, f, indent=2)
 log.info("Metrics saved: %s", metrics_path)
+
+# Send Telegram notification
+try:
+    model_name = inference_artifact["model"].__class__.__name__
+    send_model_training(
+        model_name=model_name,
+        model_version=MODEL_VERSION,
+        metrics={
+            "Features": len(all_col_names),
+            "Threshold": f"{best_threshold:.2f}",
+            "Precision": f"{precision:.4f}",
+            "Recall": f"{recall:.4f}",
+            "F1": f"{f1:.4f}",
+            "ROC-AUC": f"{roc_auc:.4f}",
+            "Train Rows": len(y_train),
+            "Test Rows": len(y_test),
+        }
+    )
+except Exception as e:
+    log.warning("Failed to send model training notification: %s", e)
 
 # 7c. Confusion matrix plot
 fig, ax = plt.subplots(figsize=(6, 5))

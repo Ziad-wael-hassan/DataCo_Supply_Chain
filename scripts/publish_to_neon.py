@@ -218,6 +218,24 @@ def _rows_to_tuples(rows: List[Dict[str, Any]], columns: List[str]) -> List[tupl
     return [tuple(row[c] for c in columns) for row in rows]
 
 
+def _reset_neon_sequences(schema: str, table: str, serial_columns: Set[str]) -> None:
+    conn = get_neon_conn()
+    try:
+        cur = conn.cursor()
+        for col in serial_columns:
+            seq_name = f"{schema}.{table}_{col}_seq"
+            cur.execute(
+                f"SELECT setval('{seq_name}', (SELECT COALESCE(MAX({col}), 0) FROM {schema}.{table}))"
+            )
+            val = cur.fetchone()[0]
+            _log(f"  Reset sequence {seq_name} to {val}")
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+
+
+
 # ---------------------------------------------------------------------------
 # Sync: full (dim tables)
 # ---------------------------------------------------------------------------
@@ -295,6 +313,7 @@ def sync_incremental(
     table: str,
     pk: str,
     date_column: str,
+    exclude_columns: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     full_table = f"{schema}.{table}"
 
@@ -321,27 +340,21 @@ def sync_incremental(
         _log(f"  No changed rows (total local: {local_count:,})")
         return {"inserted": 0, "updated": 0, "skipped": local_count, "mode": "incremental"}
 
-    neon_pks = get_pks_neon(schema, table, pk)
-    new_rows = [r for r in rows if r[pk] not in neon_pks]
-    existing_rows = [r for r in rows if r[pk] in neon_pks]
+    skip = set(exclude_columns or [])
+    insert_columns = [c for c in columns if c not in skip]
 
-    inserted = updated = 0
+    if skip:
+        _reset_neon_sequences(schema, table, skip)
 
-    if new_rows:
-        tuples = _rows_to_tuples(new_rows, columns)
-        _neon_insert(schema, table, columns, tuples)
-        inserted = len(new_rows)
+    insert_rows = [tuple(row[c] for c in insert_columns) for row in rows]
 
-    if existing_rows:
-        tuples = _rows_to_tuples(existing_rows, columns)
-        _neon_upsert(schema, table, columns, tuples, pk)
-        updated = len(existing_rows)
+    _neon_upsert(schema, table, insert_columns, insert_rows, pk)
 
-    _log(f"  Changed: {len(rows):,} | Inserted: {inserted:,} | Updated: {updated:,}")
+    _log(f"  Upserted: {len(rows):,} rows (total local: {local_count:,})")
     return {
-        "inserted": inserted,
-        "updated": updated,
-        "skipped": local_count - inserted - updated,
+        "inserted": len(rows),
+        "updated": 0,
+        "skipped": local_count - len(rows),
         "mode": "incremental",
     }
 
@@ -359,6 +372,7 @@ def sync_table(
     pk = table_config["pk"]
     sync_mode = table_config["sync_mode"]
     date_column = table_config.get("date_column")
+    exclude_columns = table_config.get("exclude_columns")
     full_name = f"{schema}.{table}"
 
     _log(f"\nPublishing {full_name}")
@@ -378,7 +392,7 @@ def sync_table(
             if not date_column:
                 _log(f"  ERROR: incremental mode requires date_column")
                 return {"status": "failed", "reason": "missing_date_column"}
-            stats = sync_incremental(local_engine, schema, table, pk, date_column)
+            stats = sync_incremental(local_engine, schema, table, pk, date_column, exclude_columns)
         else:
             _log(f"  ERROR: unknown sync_mode '{sync_mode}'")
             return {"status": "failed", "reason": f"unknown_mode:{sync_mode}"}
