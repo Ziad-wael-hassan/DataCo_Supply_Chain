@@ -16,7 +16,24 @@
 [![scikit-learn](https://img.shields.io/badge/scikit--learn-F7931E?style=flat&logo=scikitlearn&logoColor=white)](https://scikit-learn.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+<div align="center">
+
+# DataCo Supply Chain — Data Engineering + ML Platform
+
+**End-to-end data platform that turns a raw 180k-row CSV export into a governed Kimball warehouse, a fraud-detection model, and live BI dashboards — fully orchestrated and containerized.**
+
+[Demo](#demo) •
+[Architecture](docs/ARCHITECTURE.md) •
+[Installation](#installation) •
+[Documentation](#documentation)
+
+<br>
+
+<!-- Badges here -->
+
 </div>
+
+---</div>
 
 ---
 
@@ -168,7 +185,8 @@ Full lifecycle, retry behavior, and error handling are documented in [ARCHITECTU
 git clone https://github.com/Ziad-wael-hassan/DataCo_Supply_Chain.git
 cd DataCo_Supply_Chain
 cp .env.example .env      # fill in Neon + Telegram credentials
-docker compose up -d
+make up
+make pipeline
 ```
 
 Open Airflow at **http://localhost:8080** (`admin` / `admin`) and trigger the `supply_chain_pipeline` DAG.
@@ -203,17 +221,6 @@ Open Airflow at **http://localhost:8080** (`admin` / `admin`) and trigger the `s
 - ☁️ Neon cloud serving layer for BI tools
 - 📊 Live Metabase / Tableau dashboards
 
----
-
-## Roadmap
-
-- [ ] Slowly Changing Dimensions (SCD Type 2) via `dbt snapshot`
-- [ ] CDC ingestion (Debezium/Kafka) instead of full CSV reloads
-- [ ] Cloud deployment (AWS/GCP/Azure) with Terraform
-- [ ] Data lake landing zone (S3/MinIO) ahead of Postgres
-- [ ] CI pipeline (`dbt test` + validation + model smoke tests on every push)
-
----
 
 ## Documentation
 
